@@ -1584,6 +1584,7 @@ run(function()
 end)
 
 run(function()
+	-- random bug made this error
 	local CarFling
 	local GuardTarget
 	local InmateTarget
@@ -1591,8 +1592,6 @@ run(function()
 	local Mode
 	local FlingPower
 	local FlickerSpeed
-	local SelfDeath
-	local TargetHeadOnly
 	
 	local oldTargetY = 178
 	local newTargetY = 300
@@ -1703,129 +1702,125 @@ run(function()
 		return true
 	end
 	
-	local function moveCar(cframe, applyFling, targetPosition, isDeadTarget)
-    if not rootPart or not rootPart.Parent then return end
-    if carModel.PrimaryPart then
-        carModel:PivotTo(cframe)
-    else
-        for part, partOffset in partOffsets do
-            if part.Parent then
-                part.CFrame = cframe * partOffset
-            end
-        end
-    end
-    local linearVelocity, angularVelocity = Vector3.zero, Vector3.zero
-    if applyFling then
-        local force = math.clamp(FlingPower.Value * 1.8, 80, 18000)
-        if isDeadTarget then
-            -- When hitting a dead head: Launch violently forward and UP into the sky
-            linearVelocity = Vector3.new(
-                math.random(-force * 0.5, force * 0.5),
-                force * 1.2, -- Huge upward launch
-                math.random(-force * 0.5, force * 0.5)
-            )
-            -- Centrifuge spin to violently fling the 1-mass head on contact
-            angularVelocity = Vector3.new(9000, 9000, 9000)
-        else
-            local direction = targetPosition - rootPart.Position
-            local distance = direction.Magnitude
-            direction = distance > 0.1 and direction.Unit or cframe.LookVector
-            linearVelocity = direction * force + Vector3.new(
-                math.random(-force * 0.25, force * 0.25),
-                math.random(-force * 0.15, force * 0.35),
-                math.random(-force * 0.25, force * 0.25)
-            )
-            angularVelocity = Vector3.new(
-                math.random(-FlingPower.Value * 0.4, FlingPower.Value * 0.4),
-                FlingPower.Value * (math.random() > 0.5 and 1 or -1),
-                math.random(-FlingPower.Value * 0.4, FlingPower.Value * 0.4)
-            )
-        end
-    end
-    for part in partOffsets do
-        if part.Parent then
-            if isWheel(part) then
-                part.AssemblyLinearVelocity = Vector3.zero
-                part.AssemblyAngularVelocity = Vector3.zero
-            else
-                part.AssemblyLinearVelocity = linearVelocity
-                part.AssemblyAngularVelocity = angularVelocity
-            end
-        end
-    end
-    lockWheels(carModel)
-end
-local function startFling(targetPlayer)
-    flinging = true
-    frameCount, shakeTime = 0, 0
-    CarFling:Clean(runService.Heartbeat:Connect(function(deltaTime)
-        if not flinging or not targetPlayer.Character or not carModel or not carModel.Parent then
-            return
-        end
-        local char = targetPlayer.Character
-        local humanoid = char:FindFirstChildOfClass('Humanoid')
-        local isDead = (not humanoid) or (humanoid.Health <= 0)
-        -- Target the Head specifically when dead (since your scan proved Head is collidable with mass 1)
-        local targetPart = isDead and (char:FindFirstChild('Head') or char:FindFirstChild('Torso'))
-            or char:FindFirstChild('Torso') or char:FindFirstChild('Head') or char:FindFirstChild('HumanoidRootPart')
-        if not targetPart then return end
-        frameCount += 1
-        shakeTime += deltaTime
-        local predictedPosition, yaw
-        if isDead then
-            -- Dead head: lock onto its exact coordinates on the floor
-            predictedPosition = targetPart.Position
-            yaw = targetPart.Orientation.Y
-        else
-            local velocity = targetPart.AssemblyLinearVelocity
-            local horizontalVelocity = Vector3.new(velocity.X, 0, velocity.Z)
-            local moveDirection = humanoid and humanoid.MoveDirection or Vector3.zero
-            local direction
-            if moveDirection.Magnitude > 0.1 then
-                direction = Vector3.new(moveDirection.X, 0, moveDirection.Z).Unit
-            elseif horizontalVelocity.Magnitude > 1.5 then
-                direction = horizontalVelocity.Unit
-            end
-            if direction then
-                local speed = math.max(horizontalVelocity.Magnitude, Mode.Value == 'New' and 20 or 16)
-                local leadTime = math.clamp(speed * 0.18, 0.18, 0.65)
-                predictedPosition = targetPart.Position + direction * speed * leadTime
-                yaw = math.deg(math.atan2(-direction.X, -direction.Z))
-            else
-                predictedPosition = targetPart.Position
-                yaw = targetPart.Orientation.Y
-            end
-        end
-        local targetY = Mode.Value == 'New' and newTargetY or oldTargetY
-        local highCFrame = CFrame.new(savedX, targetY, savedZ) * CFrame.Angles(0, math.rad(yaw), 0)
-        if isDead then
-            -- IMPORTANT: NO SKY FLICKER WHEN DEAD!
-            -- Lower the car directly onto the floor (Y - 0.2) and ram the head continuously for solid contact
-            local groundCFrame = CFrame.new(predictedPosition.X, predictedPosition.Y - 0.2, predictedPosition.Z) 
-                * CFrame.Angles(math.rad(math.random(-15, 15)), math.rad(yaw), math.rad(math.random(-15, 15)))
-            moveCar(groundCFrame, true, predictedPosition, true)
-        else
-            -- Normal flicker behavior while target is still alive
-            local shake = Vector3.new(
-                math.sin(shakeTime * shakeSpeed) * shakeAmount,
-                math.sin(shakeTime * shakeSpeed * 1.4) * shakeAmount * 0.3,
-                math.cos(shakeTime * shakeSpeed * 0.85) * shakeAmount
-            )
-            local maxFollowY = Mode.Value == 'New' and newMaxFollowY or oldMaxFollowY
-            local minFollowY = Mode.Value == 'New' and newMinFollowY or oldMinFollowY
-            local position = Vector3.new(
-                predictedPosition.X + shake.X,
-                math.clamp(predictedPosition.Y, minFollowY, maxFollowY) - 0.6 + shake.Y,
-                predictedPosition.Z + shake.Z
-            )
-            local playerCFrame = CFrame.new(position) * CFrame.Angles(0, math.rad(yaw), 0) * CFrame.new(offset)
-            local flicker = FlickerSpeed.Value
-            local usePlayer = frameCount % flicker == 0
-            local shouldFling = Mode.Value == 'Old' or usePlayer
-            moveCar(usePlayer and playerCFrame or highCFrame, shouldFling, predictedPosition, false)
-        end
-    end))
-end
+	local function moveCar(cframe, applyFling, targetPosition)
+		if not rootPart or not rootPart.Parent then return end
+	
+		if carModel.PrimaryPart then
+			carModel:PivotTo(cframe)
+		else
+			for part, partOffset in partOffsets do
+				if part.Parent then
+					part.CFrame = cframe * partOffset
+				end
+			end
+		end
+	
+		local linearVelocity, angularVelocity = Vector3.zero, Vector3.zero
+		if applyFling then
+			local direction = targetPosition - rootPart.Position
+			local distance = direction.Magnitude
+			direction = distance > 0.1 and direction.Unit or Vector3.zero
+			local force = math.clamp(FlingPower.Value * 1.8, 80, 18000)
+			linearVelocity = direction * force + Vector3.new(
+				math.random(-force * 0.25, force * 0.25),
+				math.random(-force * 0.15, force * 0.35),
+				math.random(-force * 0.25, force * 0.25)
+			)
+			angularVelocity = Vector3.new(
+				math.random(-FlingPower.Value * 0.4, FlingPower.Value * 0.4),
+				FlingPower.Value * (math.random() > 0.5 and 1 or -1),
+				math.random(-FlingPower.Value * 0.4, FlingPower.Value * 0.4)
+			)
+		end
+	
+		for part in partOffsets do
+			if part.Parent then
+				if isWheel(part) then
+					part.AssemblyLinearVelocity = Vector3.zero
+					part.AssemblyAngularVelocity = Vector3.zero
+				else
+					part.AssemblyLinearVelocity = linearVelocity
+					part.AssemblyAngularVelocity = angularVelocity
+				end
+			end
+		end
+		lockWheels(carModel)
+	end
+	
+	local function resetState()
+		waitingForDeath, flinging = false, false
+		frameCount, shakeTime = 0, 0
+		carModel, rootPart = nil, nil
+		partOffsets = {}
+		savedX, savedZ = nil, nil
+	end
+	
+	local function startFling(targetPlayer)
+		flinging = true
+		frameCount, shakeTime = 0, 0
+		CarFling:Clean(runService.Heartbeat:Connect(function(deltaTime)
+			if not flinging or not targetPlayer.Character or not carModel or not carModel.Parent then
+				return
+			end
+	
+			local targetRoot = targetPlayer.Character:FindFirstChild('HumanoidRootPart')
+			if not targetRoot then return end
+	
+			frameCount += 1
+			shakeTime += deltaTime
+			local humanoid = targetPlayer.Character:FindFirstChildOfClass('Humanoid')
+			local velocity = targetRoot.AssemblyLinearVelocity
+			local horizontalVelocity = Vector3.new(velocity.X, 0, velocity.Z)
+			local moveDirection = humanoid and humanoid.MoveDirection or Vector3.zero
+			local direction
+	
+			if moveDirection.Magnitude > 0.1 then
+				direction = Vector3.new(moveDirection.X, 0, moveDirection.Z).Unit
+			elseif horizontalVelocity.Magnitude > 1.5 then
+				direction = horizontalVelocity.Unit
+			end
+	
+			local predictedPosition, yaw
+			if direction then
+				local speed = math.max(horizontalVelocity.Magnitude, Mode.Value == 'New' and 20 or 16)
+				local leadTime
+				if Mode.Value == 'New' then
+					leadTime = math.max(0, speed * getPingLead(targetPlayer, speed) * predictionMultiplier - leadPullback)
+					predictedPosition = targetRoot.Position + direction * leadTime
+				else
+					leadTime = math.clamp(speed * 0.18, 0.18, 0.65)
+					predictedPosition = targetRoot.Position + direction * speed * leadTime
+				end
+				yaw = math.deg(math.atan2(-direction.X, -direction.Z))
+			else
+				predictedPosition = targetRoot.Position
+				yaw = targetRoot.Orientation.Y
+			end
+	
+			local shake = Vector3.new(
+				math.sin(shakeTime * shakeSpeed) * shakeAmount,
+				math.sin(shakeTime * shakeSpeed * 1.4) * shakeAmount * 0.3,
+				math.cos(shakeTime * shakeSpeed * 0.85) * shakeAmount
+			)
+			local maxFollowY = Mode.Value == 'New' and newMaxFollowY or oldMaxFollowY
+			local minFollowY = Mode.Value == 'New' and newMinFollowY or oldMinFollowY
+			local position = Vector3.new(
+				predictedPosition.X + shake.X,
+				math.clamp(predictedPosition.Y, minFollowY, maxFollowY) - 0.6 + shake.Y,
+				predictedPosition.Z + shake.Z
+			)
+			local playerCFrame = CFrame.new(position) * CFrame.Angles(0, math.rad(yaw), 0) * CFrame.new(offset)
+			local targetY = Mode.Value == 'New' and newTargetY or oldTargetY
+			local highCFrame = CFrame.new(savedX, targetY, savedZ) * CFrame.Angles(0, math.rad(yaw), 0)
+			local flicker = FlickerSpeed.Value
+			if Mode.Value == 'New' and inPrison(predictedPosition) then
+				flicker = math.max(flicker, 6)
+			end
+			local usePlayer = frameCount % flicker == 0
+			local shouldFling = Mode.Value == 'Old' or usePlayer
+			moveCar(usePlayer and playerCFrame or highCFrame, shouldFling, predictedPosition)
+		end))
+	end
 	
 	CarFling = vape.Categories.Blatant:CreateModule({
 		Name = 'CarFling',
@@ -1850,50 +1845,31 @@ end
 	
 			savedX, savedZ = root.Position.X, root.Position.Z
 			carModel = car
-			
-			if SelfDeath.Enabled then
-				-- Wait for you to reset/die before flinging
-				waitingForDeath = true
-				CarFling:Clean(humanoid.Died:Connect(function()
-					if waitingForDeath then
-						waitingForDeath = false
-						startFling(targetPlayer)
-					end
-				end))
-				CarFling:Clean(runService.Heartbeat:Connect(function()
-					if not waitingForDeath or not entitylib.isAlive then return end
-					local currentRoot = entitylib.character.RootPart
-					local currentHumanoid = entitylib.character.Humanoid
-					local targetY = Mode.Value == 'New' and newTargetY or oldTargetY
-					local highCFrame = CFrame.new(savedX, targetY, savedZ) * CFrame.Angles(0, math.rad(currentRoot.Orientation.Y), 0)
-					moveCar(highCFrame, false, Vector3.new(savedX, targetY, savedZ))
-					currentHumanoid.Sit = true
-					currentRoot.CFrame = highCFrame * CFrame.new(0, 2, 0)
-					currentRoot.AssemblyLinearVelocity = Vector3.zero
-				end))
-			else
-				-- Start flinging immediately (NO self death needed)
-				startFling(targetPlayer)
-			end
+			waitingForDeath = true
+			CarFling:Clean(humanoid.Died:Connect(function()
+				if waitingForDeath then
+					waitingForDeath = false
+					startFling(targetPlayer)
+				end
+			end))
+			CarFling:Clean(runService.Heartbeat:Connect(function()
+				if not waitingForDeath or not entitylib.isAlive then return end
+				local currentRoot = entitylib.character.RootPart
+				local currentHumanoid = entitylib.character.Humanoid
+				local targetY = Mode.Value == 'New' and newTargetY or oldTargetY
+				local highCFrame = CFrame.new(savedX, targetY, savedZ) * CFrame.Angles(0, math.rad(currentRoot.Orientation.Y), 0)
+				moveCar(highCFrame, false, Vector3.new(savedX, targetY, savedZ))
+				currentHumanoid.Sit = true
+				currentRoot.CFrame = highCFrame * CFrame.new(0, 2, 0)
+				currentRoot.AssemblyLinearVelocity = Vector3.zero
+			end))
 		end,
-		Tooltip = 'Flicker and fling a vehicle into the target, launching their head on death.'
+		Tooltip = 'Flicker and fling a vehicle after you die.'
 	})
 	
 	Mode = CarFling:CreateDropdown({
 		Name = 'Mode',
 		List = {'Old', 'New'}
-	})
-	
-	TargetHeadOnly = CarFling:CreateToggle({
-		Name = 'Target Head Only',
-		Default = false,
-		Tooltip = 'Always target their head even while alive'
-	})
-
-	SelfDeath = CarFling:CreateToggle({
-		Name = 'Require Self Death',
-		Default = false,
-		Tooltip = 'Wait for your own death first (Leave OFF to fling while alive)'
 	})
 	
 	GuardTarget = CarFling:CreateDropdown({
@@ -1923,6 +1899,239 @@ end
 		Darker = true
 	})
 	
+	playersService.PlayerAdded:Connect(function(player)
+		player:GetPropertyChangedSignal('Team'):Connect(refreshTargets)
+		refreshTargets()
+	end)
+	playersService.PlayerRemoving:Connect(function()
+		refreshTargets()
+	end)
+	for _, player in playersService:GetPlayers() do
+		if player ~= lplr then
+			player:GetPropertyChangedSignal('Team'):Connect(refreshTargets)
+		end
+	end
+end)
+
+run(function()
+	local HeadFling
+	local GuardTarget
+	local InmateTarget
+	local CriminalTarget
+	local FlingMode
+	local FlingPower
+	local FlingDuration
+	local AutoReturn
+	
+	local flinging = false
+	local activeDeathConn
+	
+	local function playerNames(teamName)
+		local names = {'None'}
+		for _, player in playersService:GetPlayers() do
+			if player ~= lplr and player.Team and player.Team.Name == teamName then
+				table.insert(names, player.DisplayName .. ' - ' .. player.Name)
+			end
+		end
+		return names
+	end
+	
+	local function getTargetPlayer(value)
+		local username = value:match(' %- (.+)$')
+		return username and playersService:FindFirstChild(username)
+	end
+	
+	local function selectedTarget()
+		for _, value in {GuardTarget.Value, InmateTarget.Value, CriminalTarget.Value} do
+			local player = getTargetPlayer(value)
+			if player then return player end
+		end
+	end
+	
+	local function refreshTargets()
+		GuardTarget:Change(playerNames('Guards'))
+		InmateTarget:Change(playerNames('Inmates'))
+		CriminalTarget:Change(playerNames('Criminals'))
+	end
+
+	--// The Core No-Car Fling Method
+	local function launchFling(targetPlayer, targetPart)
+		if flinging or not entitylib.isAlive then return end
+		flinging = true
+
+		local char = lplr.Character
+		local root = entitylib.character.RootPart
+		local humanoid = entitylib.character.Humanoid
+		local torso = char:FindFirstChild('Torso')
+		if not root or not humanoid or not targetPart then
+			flinging = false
+			return
+		end
+
+		local savedCFrame = root.CFrame
+		local savedCameraCFrame = gameCamera.CFrame
+		local power = FlingPower.Value * 10000
+		local duration = FlingDuration.Value / 10 -- 0.2 to 1.0s burst
+		local startTime = tick()
+
+		-- Noclip limbs to avoid tripping on the map, but keep Torso collidable
+		local noclipConn
+		noclipConn = runService.Stepped:Connect(function()
+			for _, part in ipairs(char:GetChildren()) do
+				if part:IsA('BasePart') then
+					part.CanCollide = (part.Name == 'Torso' or part.Name == 'HumanoidRootPart')
+				end
+			end
+		end)
+
+		-- Main Fling Loop (Heartbeat physics injection)
+		local flingConn
+		flingConn = runService.Heartbeat:Connect(function()
+			if not HeadFling.Enabled or not root.Parent or not targetPart.Parent or (tick() - startTime) >= duration then
+				if flingConn then flingConn:Disconnect() end
+				return
+			end
+
+			-- Lock camera so your screen doesn't spin wildly
+			gameCamera.CFrame = savedCameraCFrame
+
+			-- Inject extreme rotational momentum & upward launch
+			root.AssemblyAngularVelocity = Vector3.new(power, power, power)
+			root.AssemblyLinearVelocity = Vector3.new(math.random(-50, 50), power * 0.1, math.random(-50, 50))
+
+			-- Slam directly into the dead head at ground level
+			local headPos = targetPart.Position
+			local offset = Vector3.new(math.random(-10, 10) / 100, -0.35, math.random(-10, 10) / 100)
+			root.CFrame = CFrame.new(headPos + offset) * CFrame.Angles(
+				math.rad(math.random(0, 360)),
+				math.rad(math.random(0, 360)),
+				0
+			)
+		end)
+
+		task.wait(duration)
+
+		if flingConn then flingConn:Disconnect() end
+		if noclipConn then noclipConn:Disconnect() end
+
+		-- Instantly restore safe state
+		if root.Parent then
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.AssemblyAngularVelocity = Vector3.zero
+
+			if AutoReturn.Enabled then
+				root.CFrame = savedCFrame
+				humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+			end
+		end
+
+		flinging = false
+	end
+
+	local function watchTarget(targetPlayer)
+		if activeDeathConn then
+			activeDeathConn:Disconnect()
+			activeDeathConn = nil
+		end
+
+		local function checkChar(char)
+			local humanoid = char:WaitForChild('Humanoid', 5)
+			local head = char:WaitForChild('Head', 5)
+			if not humanoid or not head then return end
+
+			activeDeathConn = humanoid:GetPropertyChangedSignal('Health'):Connect(function()
+				if humanoid.Health <= 0 then
+					-- The exact instant health hits 0, blast their head!
+					task.defer(launchFling, targetPlayer, head)
+				end
+			end)
+		end
+
+		if targetPlayer.Character then
+			task.spawn(checkChar, targetPlayer.Character)
+		end
+		targetPlayer.CharacterAdded:Connect(checkChar)
+	end
+
+	HeadFling = vape.Categories.Blatant:CreateModule({
+		Name = 'HeadFling',
+		Function = function(callback)
+			if callback then
+				local targetPlayer = selectedTarget()
+				if not targetPlayer then
+					notif('HeadFling', 'Select a target player first.', 4, 'alert')
+					HeadFling:Toggle()
+					return
+				end
+
+				if FlingMode.Value == 'On Death' then
+					notif('HeadFling', 'Waiting for ' .. targetPlayer.DisplayName .. ' to die...', 3)
+					watchTarget(targetPlayer)
+				else
+					-- Immediate Fling
+					local char = targetPlayer.Character
+					local targetPart = char and (char:FindFirstChild('Head') or char:FindFirstChild('HumanoidRootPart'))
+					if targetPart then
+						task.spawn(launchFling, targetPlayer, targetPart)
+					else
+						notif('HeadFling', 'Target not spawned yet.', 3, 'warn')
+					end
+					HeadFling:Toggle()
+				end
+			else
+				if activeDeathConn then
+					activeDeathConn:Disconnect()
+					activeDeathConn = nil
+				end
+				flinging = false
+			end
+		end,
+		Tooltip = 'Launches a target\'s severed head into orbit without needing a car.'
+	})
+
+	FlingMode = HeadFling:CreateDropdown({
+		Name = 'Mode',
+		List = {'On Death', 'Immediate'},
+		Tooltip = 'On Death: Waits for target to die then blasts their head\nImmediate: Flings them right now'
+	})
+
+	GuardTarget = HeadFling:CreateDropdown({
+		Name = 'Guard',
+		List = playerNames('Guards')
+	})
+	InmateTarget = HeadFling:CreateDropdown({
+		Name = 'Inmates',
+		List = playerNames('Inmates')
+	})
+	CriminalTarget = HeadFling:CreateDropdown({
+		Name = 'Criminals',
+		List = playerNames('Criminals')
+	})
+
+	FlingPower = HeadFling:CreateSlider({
+		Name = 'Power',
+		Min = 10,
+		Max = 999,
+		Default = 500,
+		Darker = true,
+		Tooltip = 'Rotational momentum force'
+	})
+
+	FlingDuration = HeadFling:CreateSlider({
+		Name = 'Burst Time (0.1s)',
+		Min = 1,
+		Max = 10,
+		Default = 3,
+		Darker = true,
+		Tooltip = 'How long the fling burst lasts (3 = 0.3s)'
+	})
+
+	AutoReturn = HeadFling:CreateToggle({
+		Name = 'Auto Return',
+		Default = true,
+		Tooltip = 'Teleports you back to where you were standing immediately after the fling'
+	})
+
 	playersService.PlayerAdded:Connect(function(player)
 		player:GetPropertyChangedSignal('Team'):Connect(refreshTargets)
 		refreshTargets()
