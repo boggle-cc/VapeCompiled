@@ -1703,149 +1703,129 @@ run(function()
 		return true
 	end
 	
-	local function moveCar(cframe, applyFling, targetPosition)
-		if not rootPart or not rootPart.Parent then return end
-	
-		if carModel.PrimaryPart then
-			carModel:PivotTo(cframe)
-		else
-			for part, partOffset in partOffsets do
-				if part.Parent then
-					part.CFrame = cframe * partOffset
-				end
-			end
-		end
-	
-		local linearVelocity, angularVelocity = Vector3.zero, Vector3.zero
-		if applyFling then
-			local direction = targetPosition - rootPart.Position
-			local distance = direction.Magnitude
-			direction = distance > 0.1 and direction.Unit or Vector3.zero
-			local force = math.clamp(FlingPower.Value * 1.8, 80, 18000)
-			linearVelocity = direction * force + Vector3.new(
-				math.random(-force * 0.25, force * 0.25),
-				math.random(-force * 0.15, force * 0.35),
-				math.random(-force * 0.25, force * 0.25)
-			)
-			angularVelocity = Vector3.new(
-				math.random(-FlingPower.Value * 0.4, FlingPower.Value * 0.4),
-				FlingPower.Value * (math.random() > 0.5 and 1 or -1),
-				math.random(-FlingPower.Value * 0.4, FlingPower.Value * 0.4)
-			)
-		end
-	
-		for part in partOffsets do
-			if part.Parent then
-				if isWheel(part) then
-					part.AssemblyLinearVelocity = Vector3.zero
-					part.AssemblyAngularVelocity = Vector3.zero
-				else
-					part.AssemblyLinearVelocity = linearVelocity
-					part.AssemblyAngularVelocity = angularVelocity
-				end
-			end
-		end
-		lockWheels(carModel)
-	end
-	
-	local function resetState()
-		waitingForDeath, flinging = false, false
-		frameCount, shakeTime = 0, 0
-		carModel, rootPart = nil, nil
-		partOffsets = {}
-		savedX, savedZ = nil, nil
-	end
-	
-	local function startFling(targetPlayer)
-		flinging = true
-		frameCount, shakeTime = 0, 0
-		CarFling:Clean(runService.Heartbeat:Connect(function(deltaTime)
-			if not flinging or not targetPlayer.Character or not carModel or not carModel.Parent then
-				return
-			end
-	
-			local char = targetPlayer.Character
-			local humanoid = char:FindFirstChildOfClass('Humanoid')
-			local isDead = (not humanoid) or (humanoid.Health <= 0)
-			
-			--// Lock onto their HEAD when they die (or if TargetHeadOnly is on)
-			local targetPart
-			if isDead or TargetHeadOnly.Enabled then
-				targetPart = char:FindFirstChild('Head') or char:FindFirstChild('Torso')
-			else
-				targetPart = char:FindFirstChild('HumanoidRootPart') or char:FindFirstChild('Torso') or char:FindFirstChild('Head')
-			end
-			
-			if not targetPart then return end
-	
-			frameCount += 1
-			shakeTime += deltaTime
-			
-			local predictedPosition, yaw
-			
-			if isDead then
-				-- Target is dead: Direct lock on their head without walking prediction
-				predictedPosition = targetPart.Position
-				yaw = targetPart.Orientation.Y
-			else
-				local velocity = targetPart.AssemblyLinearVelocity
-				local horizontalVelocity = Vector3.new(velocity.X, 0, velocity.Z)
-				local moveDirection = humanoid and humanoid.MoveDirection or Vector3.zero
-				local direction
-		
-				if moveDirection.Magnitude > 0.1 then
-					direction = Vector3.new(moveDirection.X, 0, moveDirection.Z).Unit
-				elseif horizontalVelocity.Magnitude > 1.5 then
-					direction = horizontalVelocity.Unit
-				end
-		
-				if direction then
-					local speed = math.max(horizontalVelocity.Magnitude, Mode.Value == 'New' and 20 or 16)
-					local leadTime
-					if Mode.Value == 'New' then
-						leadTime = math.max(0, speed * getPingLead(targetPlayer, speed) * predictionMultiplier - leadPullback)
-						predictedPosition = targetPart.Position + direction * leadTime
-					else
-						leadTime = math.clamp(speed * 0.18, 0.18, 0.65)
-						predictedPosition = targetPart.Position + direction * speed * leadTime
-					end
-					yaw = math.deg(math.atan2(-direction.X, -direction.Z))
-				else
-					predictedPosition = targetPart.Position
-					yaw = targetPart.Orientation.Y
-				end
-			end
-	
-			local shake = Vector3.new(
-				math.sin(shakeTime * shakeSpeed) * shakeAmount,
-				math.sin(shakeTime * shakeSpeed * 1.4) * shakeAmount * 0.3,
-				math.cos(shakeTime * shakeSpeed * 0.85) * shakeAmount
-			)
-			local maxFollowY = Mode.Value == 'New' and newMaxFollowY or oldMaxFollowY
-			local minFollowY = Mode.Value == 'New' and newMinFollowY or oldMinFollowY
-			
-			-- If dead, adjust height so the car's bumper slams directly into the head on the ground
-			local yOffset = isDead and 0.5 or -0.6
-			local position = Vector3.new(
-				predictedPosition.X + shake.X,
-				math.clamp(predictedPosition.Y, minFollowY, maxFollowY) + yOffset + shake.Y,
-				predictedPosition.Z + shake.Z
-			)
-			
-			local currentOffset = isDead and Vector3.zero or offset
-			local playerCFrame = CFrame.new(position) * CFrame.Angles(0, math.rad(yaw), 0) * CFrame.new(currentOffset)
-			local targetY = Mode.Value == 'New' and newTargetY or oldTargetY
-			local highCFrame = CFrame.new(savedX, targetY, savedZ) * CFrame.Angles(0, math.rad(yaw), 0)
-			
-			local flicker = FlickerSpeed.Value
-			if Mode.Value == 'New' and inPrison(predictedPosition) then
-				flicker = math.max(flicker, 6)
-			end
-			local usePlayer = frameCount % flicker == 0
-			local shouldFling = Mode.Value == 'Old' or usePlayer
-			moveCar(usePlayer and playerCFrame or highCFrame, shouldFling, predictedPosition)
-		end))
-	end
+	local function moveCar(cframe, applyFling, targetPosition, isDeadTarget)
+    if not rootPart or not rootPart.Parent then return end
+    if carModel.PrimaryPart then
+        carModel:PivotTo(cframe)
+    else
+        for part, partOffset in partOffsets do
+            if part.Parent then
+                part.CFrame = cframe * partOffset
+            end
+        end
+    end
+    local linearVelocity, angularVelocity = Vector3.zero, Vector3.zero
+    if applyFling then
+        local force = math.clamp(FlingPower.Value * 1.8, 80, 18000)
+        if isDeadTarget then
+            -- When hitting a dead head: Launch violently forward and UP into the sky
+            linearVelocity = Vector3.new(
+                math.random(-force * 0.5, force * 0.5),
+                force * 1.2, -- Huge upward launch
+                math.random(-force * 0.5, force * 0.5)
+            )
+            -- Centrifuge spin to violently fling the 1-mass head on contact
+            angularVelocity = Vector3.new(9000, 9000, 9000)
+        else
+            local direction = targetPosition - rootPart.Position
+            local distance = direction.Magnitude
+            direction = distance > 0.1 and direction.Unit or cframe.LookVector
+            linearVelocity = direction * force + Vector3.new(
+                math.random(-force * 0.25, force * 0.25),
+                math.random(-force * 0.15, force * 0.35),
+                math.random(-force * 0.25, force * 0.25)
+            )
+            angularVelocity = Vector3.new(
+                math.random(-FlingPower.Value * 0.4, FlingPower.Value * 0.4),
+                FlingPower.Value * (math.random() > 0.5 and 1 or -1),
+                math.random(-FlingPower.Value * 0.4, FlingPower.Value * 0.4)
+            )
+        end
+    end
+    for part in partOffsets do
+        if part.Parent then
+            if isWheel(part) then
+                part.AssemblyLinearVelocity = Vector3.zero
+                part.AssemblyAngularVelocity = Vector3.zero
+            else
+                part.AssemblyLinearVelocity = linearVelocity
+                part.AssemblyAngularVelocity = angularVelocity
+            end
+        end
+    end
+    lockWheels(carModel)
+end
+local function startFling(targetPlayer)
+    flinging = true
+    frameCount, shakeTime = 0, 0
+    CarFling:Clean(runService.Heartbeat:Connect(function(deltaTime)
+        if not flinging or not targetPlayer.Character or not carModel or not carModel.Parent then
+            return
+        end
+        local char = targetPlayer.Character
+        local humanoid = char:FindFirstChildOfClass('Humanoid')
+        local isDead = (not humanoid) or (humanoid.Health <= 0)
+        -- Target the Head specifically when dead (since your scan proved Head is collidable with mass 1)
+        local targetPart = isDead and (char:FindFirstChild('Head') or char:FindFirstChild('Torso'))
+            or char:FindFirstChild('Torso') or char:FindFirstChild('Head') or char:FindFirstChild('HumanoidRootPart')
+        if not targetPart then return end
+        frameCount += 1
+        shakeTime += deltaTime
+        local predictedPosition, yaw
+        if isDead then
+            -- Dead head: lock onto its exact coordinates on the floor
+            predictedPosition = targetPart.Position
+            yaw = targetPart.Orientation.Y
+        else
+            local velocity = targetPart.AssemblyLinearVelocity
+            local horizontalVelocity = Vector3.new(velocity.X, 0, velocity.Z)
+            local moveDirection = humanoid and humanoid.MoveDirection or Vector3.zero
+            local direction
+            if moveDirection.Magnitude > 0.1 then
+                direction = Vector3.new(moveDirection.X, 0, moveDirection.Z).Unit
+            elseif horizontalVelocity.Magnitude > 1.5 then
+                direction = horizontalVelocity.Unit
+            end
+            if direction then
+                local speed = math.max(horizontalVelocity.Magnitude, Mode.Value == 'New' and 20 or 16)
+                local leadTime = math.clamp(speed * 0.18, 0.18, 0.65)
+                predictedPosition = targetPart.Position + direction * speed * leadTime
+                yaw = math.deg(math.atan2(-direction.X, -direction.Z))
+            else
+                predictedPosition = targetPart.Position
+                yaw = targetPart.Orientation.Y
+            end
+        end
+        local targetY = Mode.Value == 'New' and newTargetY or oldTargetY
+        local highCFrame = CFrame.new(savedX, targetY, savedZ) * CFrame.Angles(0, math.rad(yaw), 0)
+        if isDead then
+            -- IMPORTANT: NO SKY FLICKER WHEN DEAD!
+            -- Lower the car directly onto the floor (Y - 0.2) and ram the head continuously for solid contact
+            local groundCFrame = CFrame.new(predictedPosition.X, predictedPosition.Y - 0.2, predictedPosition.Z) 
+                * CFrame.Angles(math.rad(math.random(-15, 15)), math.rad(yaw), math.rad(math.random(-15, 15)))
+            moveCar(groundCFrame, true, predictedPosition, true)
+        else
+            -- Normal flicker behavior while target is still alive
+            local shake = Vector3.new(
+                math.sin(shakeTime * shakeSpeed) * shakeAmount,
+                math.sin(shakeTime * shakeSpeed * 1.4) * shakeAmount * 0.3,
+                math.cos(shakeTime * shakeSpeed * 0.85) * shakeAmount
+            )
+            local maxFollowY = Mode.Value == 'New' and newMaxFollowY or oldMaxFollowY
+            local minFollowY = Mode.Value == 'New' and newMinFollowY or oldMinFollowY
+            local position = Vector3.new(
+                predictedPosition.X + shake.X,
+                math.clamp(predictedPosition.Y, minFollowY, maxFollowY) - 0.6 + shake.Y,
+                predictedPosition.Z + shake.Z
+            )
+            local playerCFrame = CFrame.new(position) * CFrame.Angles(0, math.rad(yaw), 0) * CFrame.new(offset)
+            local flicker = FlickerSpeed.Value
+            local usePlayer = frameCount % flicker == 0
+            local shouldFling = Mode.Value == 'Old' or usePlayer
+            moveCar(usePlayer and playerCFrame or highCFrame, shouldFling, predictedPosition, false)
+        end
+    end))
+end
 	
 	CarFling = vape.Categories.Blatant:CreateModule({
 		Name = 'CarFling',
