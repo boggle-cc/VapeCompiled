@@ -1918,10 +1918,11 @@ run(function()
 	local GuardTarget
 	local InmateTarget
 	local CriminalTarget
-	local FlingMode
-	local FlingPower
-	local FlingDuration
+	local FlingMethod
+	local FlingTrigger
+	local RamPower
 	local AutoReturn
+	local CameraLock
 	
 	local flinging = false
 	local activeDeathConn
@@ -1954,75 +1955,134 @@ run(function()
 		CriminalTarget:Change(playerNames('Criminals'))
 	end
 
-	--// The Core No-Car Fling Method
-	local function launchFling(targetPlayer, targetPart)
-		if flinging or not entitylib.isAlive then return end
+	-- Find shotgun or firearm in inventory / character
+	local function getFirearm()
+		local char = lplr.Character
+		local tool = char and char:FindFirstChildWhichIsA('Tool')
+		if tool and tool:GetAttribute('FireRate') and tool.Name ~= 'Taser' then
+			return tool
+		end
+
+		local backpack = lplr:FindFirstChildWhichIsA('Backpack')
+		if backpack then
+			-- Prioritize Remington 870 (multi-pellet knockback)
+			local remington = backpack:FindFirstChild('Remington 870')
+			if remington then return remington end
+
+			for _, t in ipairs(backpack:GetChildren()) do
+				if t:IsA('Tool') and t:GetAttribute('FireRate') and t.Name ~= 'Taser' then
+					return t
+				end
+			end
+		end
+		return nil
+	end
+
+	-- The Core Fling Execution
+	local function executeFling(targetPlayer, targetHead)
+		if flinging or not entitylib.isAlive or not targetHead or not targetHead.Parent then return end
 		flinging = true
 
 		local char = lplr.Character
 		local root = entitylib.character.RootPart
-		local humanoid = entitylib.character.Humanoid
+		local hum = entitylib.character.Humanoid
 		local torso = char:FindFirstChild('Torso')
-		if not root or not humanoid or not targetPart then
+		if not root or not hum then
 			flinging = false
 			return
 		end
 
-		local savedCFrame = root.CFrame
-		local savedCameraCFrame = gameCamera.CFrame
-		local power = FlingPower.Value * 10000
-		local duration = FlingDuration.Value / 10 -- 0.2 to 1.0s burst
-		local startTime = tick()
+		local savedPos = root.CFrame
+		local savedCam = gameCamera.CFrame
+		local method = FlingMethod.Value
 
-		-- Noclip limbs to avoid tripping on the map, but keep Torso collidable
-		local noclipConn
-		noclipConn = runService.Stepped:Connect(function()
-			for _, part in ipairs(char:GetChildren()) do
-				if part:IsA('BasePart') then
-					part.CanCollide = (part.Name == 'Torso' or part.Name == 'HumanoidRootPart')
+		--// METHOD 1: Kinetic Ram & Hybrid
+		if method == 'Kinetic Ram' or method == 'Hybrid (Ram + Blast)' then
+			-- Enable torso collisions so it connects with the head
+			local stepConn = runService.Stepped:Connect(function()
+				if torso then torso.CanCollide = true end
+				root.CanCollide = true
+				for _, p in ipairs(char:GetChildren()) do
+					if p:IsA('BasePart') and p.Name ~= 'Torso' and p.Name ~= 'HumanoidRootPart' then
+						p.CanCollide = false
+					end
+				end
+			end)
+
+			if CameraLock.Enabled then
+				gameCamera.CFrame = savedCam
+			end
+
+			-- 1. Position 3.5 studs away angled directly at the severed head
+			local dir = (targetHead.Position - savedPos.Position) * Vector3.new(1, 0, 1)
+			local approachOffset = (dir.Magnitude > 0.1 and -dir.Unit or Vector3.new(0, 0, -1)) * 3.5 + Vector3.new(0, 1.8, 0)
+			local approachPos = targetHead.Position + approachOffset
+			root.CFrame = CFrame.lookAt(approachPos, targetHead.Position)
+
+			task.wait(0.04)
+
+			-- 2. Launch your character physically THROUGH the head
+			local ramDir = (targetHead.Position - root.Position).Unit
+			local power = RamPower.Value
+			root.AssemblyLinearVelocity = (ramDir * power) + Vector3.new(0, power * 0.25, 0)
+			root.AssemblyAngularVelocity = Vector3.new(6000, 6000, 6000)
+
+			-- If Hybrid: Fire shotgun simultaneously as you ram
+			if method == 'Hybrid (Ram + Blast)' then
+				local gun = getFirearm()
+				if gun then
+					hum:EquipTool(gun)
+					task.defer(function()
+						if pl.Shoot then
+							local obj = {UserInputState = Enum.UserInputState.Begin, UserInputType = Enum.UserInputType.MouseButton1, Position = Vector3.zero}
+							task.spawn(pl.Shoot, obj)
+							obj.UserInputState = Enum.UserInputState.End
+						end
+					end)
 				end
 			end
-		end)
 
-		-- Main Fling Loop (Heartbeat physics injection)
-		local flingConn
-		flingConn = runService.Heartbeat:Connect(function()
-			if not HeadFling.Enabled or not root.Parent or not targetPart.Parent or (tick() - startTime) >= duration then
-				if flingConn then flingConn:Disconnect() end
-				return
+			-- Sustain for 0.18s to guarantee server physics resolution
+			task.wait(0.18)
+
+			if stepConn then stepConn:Disconnect() end
+
+		--// METHOD 2: Shotgun / Ballistic Blast
+		elseif method == 'Shotgun Blast' then
+			local gun = getFirearm()
+			if gun then
+				hum:EquipTool(gun)
+
+				-- Position 2.5 studs directly above the head looking down
+				local blastPos = targetHead.Position + Vector3.new(0, 2.5, 0)
+				root.CFrame = CFrame.lookAt(blastPos, targetHead.Position)
+				gameCamera.CFrame = CFrame.lookAt(blastPos + Vector3.new(0, 1, 0), targetHead.Position)
+
+				task.wait(0.04)
+
+				-- Fire point-blank blast into the dead head
+				if pl.Shoot then
+					local obj = {UserInputState = Enum.UserInputState.Begin, UserInputType = Enum.UserInputType.MouseButton1, Position = Vector3.zero}
+					task.spawn(pl.Shoot, obj)
+					obj.UserInputState = Enum.UserInputState.End
+				end
+
+				task.wait(0.1)
+			else
+				notif('HeadFling', 'Equip a gun or have one in backpack first!', 3, 'warn')
 			end
+		end
 
-			-- Lock camera so your screen doesn't spin wildly
-			gameCamera.CFrame = savedCameraCFrame
-
-			-- Inject extreme rotational momentum & upward launch
-			root.AssemblyAngularVelocity = Vector3.new(power, power, power)
-			root.AssemblyLinearVelocity = Vector3.new(math.random(-50, 50), power * 0.1, math.random(-50, 50))
-
-			-- Slam directly into the dead head at ground level
-			local headPos = targetPart.Position
-			local offset = Vector3.new(math.random(-10, 10) / 100, -0.35, math.random(-10, 10) / 100)
-			root.CFrame = CFrame.new(headPos + offset) * CFrame.Angles(
-				math.rad(math.random(0, 360)),
-				math.rad(math.random(0, 360)),
-				0
-			)
-		end)
-
-		task.wait(duration)
-
-		if flingConn then flingConn:Disconnect() end
-		if noclipConn then noclipConn:Disconnect() end
-
-		-- Instantly restore safe state
-		if root.Parent then
+		-- Safe Return
+		if AutoReturn.Enabled and root and root.Parent then
 			root.AssemblyLinearVelocity = Vector3.zero
 			root.AssemblyAngularVelocity = Vector3.zero
+			root.CFrame = savedPos
+			hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+		end
 
-			if AutoReturn.Enabled then
-				root.CFrame = savedCFrame
-				humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
-			end
+		if CameraLock.Enabled and gameCamera then
+			gameCamera.CFrame = savedCam
 		end
 
 		flinging = false
@@ -2041,8 +2101,8 @@ run(function()
 
 			activeDeathConn = humanoid:GetPropertyChangedSignal('Health'):Connect(function()
 				if humanoid.Health <= 0 then
-					-- The exact instant health hits 0, blast their head!
-					task.defer(launchFling, targetPlayer, head)
+					-- The exact instant health hits 0, trigger the chosen method
+					task.defer(executeFling, targetPlayer, head)
 				end
 			end)
 		end
@@ -2064,15 +2124,15 @@ run(function()
 					return
 				end
 
-				if FlingMode.Value == 'On Death' then
+				if FlingTrigger.Value == 'On Death' then
 					notif('HeadFling', 'Waiting for ' .. targetPlayer.DisplayName .. ' to die...', 3)
 					watchTarget(targetPlayer)
 				else
-					-- Immediate Fling
+					-- Immediate Trigger
 					local char = targetPlayer.Character
 					local targetPart = char and (char:FindFirstChild('Head') or char:FindFirstChild('HumanoidRootPart'))
 					if targetPart then
-						task.spawn(launchFling, targetPlayer, targetPart)
+						task.spawn(executeFling, targetPlayer, targetPart)
 					else
 						notif('HeadFling', 'Target not spawned yet.', 3, 'warn')
 					end
@@ -2086,13 +2146,19 @@ run(function()
 				flinging = false
 			end
 		end,
-		Tooltip = 'Launches a target\'s severed head into orbit without needing a car.'
+		Tooltip = 'Launches a target\'s severed head on death using Kinetic Ram or Shotgun Blast.'
 	})
 
-	FlingMode = HeadFling:CreateDropdown({
-		Name = 'Mode',
+	FlingMethod = HeadFling:CreateDropdown({
+		Name = 'Method',
+		List = {'Kinetic Ram', 'Shotgun Blast', 'Hybrid (Ram + Blast)'},
+		Tooltip = 'Kinetic Ram: High-speed physics collision\nShotgun Blast: Point-blank firearm impulse\nHybrid: Both at once'
+	})
+
+	FlingTrigger = HeadFling:CreateDropdown({
+		Name = 'Trigger',
 		List = {'On Death', 'Immediate'},
-		Tooltip = 'On Death: Waits for target to die then blasts their head\nImmediate: Flings them right now'
+		Tooltip = 'On Death: Waits for target to die\nImmediate: Fires right now'
 	})
 
 	GuardTarget = HeadFling:CreateDropdown({
@@ -2108,28 +2174,25 @@ run(function()
 		List = playerNames('Criminals')
 	})
 
-	FlingPower = HeadFling:CreateSlider({
-		Name = 'Power',
-		Min = 10,
-		Max = 999,
-		Default = 500,
+	RamPower = HeadFling:CreateSlider({
+		Name = 'Ram Speed',
+		Min = 1000,
+		Max = 5000,
+		Default = 2500,
 		Darker = true,
-		Tooltip = 'Rotational momentum force'
-	})
-
-	FlingDuration = HeadFling:CreateSlider({
-		Name = 'Burst Time (0.1s)',
-		Min = 1,
-		Max = 10,
-		Default = 3,
-		Darker = true,
-		Tooltip = 'How long the fling burst lasts (3 = 0.3s)'
+		Tooltip = 'Velocity for Kinetic Ram'
 	})
 
 	AutoReturn = HeadFling:CreateToggle({
 		Name = 'Auto Return',
 		Default = true,
-		Tooltip = 'Teleports you back to where you were standing immediately after the fling'
+		Tooltip = 'Teleports you back to your spot right after striking'
+	})
+
+	CameraLock = HeadFling:CreateToggle({
+		Name = 'Camera Lock',
+		Default = true,
+		Tooltip = 'Freezes camera position during the strike so your screen stays smooth'
 	})
 
 	playersService.PlayerAdded:Connect(function(player)
