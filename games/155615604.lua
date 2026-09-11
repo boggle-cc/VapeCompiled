@@ -2214,16 +2214,15 @@ run(function()
 	local GuardTarget
 	local InmateTarget
 	local CriminalTarget
-	local UndergroundDepth
-	local CycleSpeed
+	local DepthSlider
+	local CycleRate
 	local AutoEquip
-	local ReturnOnDeath
+	local AutoReloadWeapon
 	
 	local active = false
 	local savedCFrame
-	local undergroundCFrame
-	local frameCounter = 0
-	local fireDelay = 0
+	local frameCount = 0
+	local lastShootTime = 0
 
 	local function playerNames(teamName)
 		local names = {'None'}
@@ -2245,26 +2244,44 @@ run(function()
 			local player = getTargetPlayer(value)
 			if player then return player end
 		end
+		-- Fallback: Check Vape's global target list
+		for _, player in playersService:GetPlayers() do
+			if player ~= lplr and isTarget(player) then
+				return player
+			end
+		end
+	end
+
+	-- Safe Dropdown updater (fixes the :Change crash)
+	local function safeUpdateDropdown(dropdown, list)
+		if not dropdown then return end
+		pcall(function()
+			if dropdown.UpdateList then
+				dropdown:UpdateList(list)
+			elseif dropdown.SetList then
+				dropdown:SetList(list)
+			end
+		end)
+		dropdown.List = list
 	end
 
 	local function refreshTargets()
-		GuardTarget:Change(playerNames('Guards'))
-		InmateTarget:Change(playerNames('Inmates'))
-		CriminalTarget:Change(playerNames('Criminals'))
+		safeUpdateDropdown(GuardTarget, playerNames('Guards'))
+		safeUpdateDropdown(InmateTarget, playerNames('Inmates'))
+		safeUpdateDropdown(CriminalTarget, playerNames('Criminals'))
 	end
 
-	-- Get available firearm
-	local function getWeapon()
+	local function getFirearm()
 		local char = lplr.Character
 		local tool = char and char:FindFirstChildWhichIsA('Tool')
-		if tool and tool:GetAttribute('FireRate') and (tool:GetAttribute('Local_CurrentAmmo') or 1) > 0 and tool.Name ~= 'Taser' then
+		if tool and tool:GetAttribute('FireRate') and tool.Name ~= 'Taser' then
 			return tool
 		end
 
 		local backpack = lplr:FindFirstChildWhichIsA('Backpack')
 		if backpack then
 			for _, t in ipairs(backpack:GetChildren()) do
-				if t:IsA('Tool') and t:GetAttribute('FireRate') and (t:GetAttribute('Local_CurrentAmmo') or 1) > 0 and t.Name ~= 'Taser' then
+				if t:IsA('Tool') and t:GetAttribute('FireRate') and t.Name ~= 'Taser' then
 					return t
 				end
 			end
@@ -2272,19 +2289,12 @@ run(function()
 		return nil
 	end
 
-	-- Check if wallbang is possible from an underground position
-	local function canWallbangFrom(originPos, targetPart, entity)
-		if not OriginScanner.Ray or not targetPart then return false end
-		
-		-- Direct ray check or scanner hit
-		local ray = workspace:Raycast(targetPart.Position, (originPos - targetPart.Position), OriginScanner.Ray)
-		if not ray then
-			return true
-		end
-
-		-- Check if OriginScanner can find a valid penetration point
-		local scanOrigin = OriginScanner:Scan(originPos, targetPart.Position, nil, targetPart, entity)
-		return scanOrigin ~= nil
+	-- Check if underground wallbang can hit the target
+	local function checkWallbangPossible(undergroundPos, targetPos, entity)
+		if not entity then return false end
+		-- In entitylib, Wallcheck returns false when the ray can hit or wallbang penetrates
+		local blocked = entitylib.Wallcheck(undergroundPos, targetPos, undergroundPos, 'Head', entity)
+		return not blocked
 	end
 
 	Loopkill = vape.Categories.Blatant:CreateModule({
@@ -2293,12 +2303,12 @@ run(function()
 			if callback then
 				local targetPlayer = selectedTarget()
 				if not targetPlayer then
-					notif('Loopkill', 'Select a target player first.', 4, 'alert')
+					notif('Loopkill', 'Select a target in dropdown or target list first.', 4, 'alert')
 					Loopkill:Toggle()
 					return
 				end
 
-				-- Automatically ensure SilentAim & Wallbang are enabled for the loopkill
+				-- Auto-enable SilentAim and Wallbang so bullets curve through floor
 				if not SilentAim.Enabled then
 					SilentAim:Toggle()
 				end
@@ -2312,10 +2322,10 @@ run(function()
 				end
 
 				active = true
-				frameCounter = 0
-				fireDelay = 0
+				frameCount = 0
+				lastShootTime = 0
 
-				-- Keep limbs noclip so you do not clip or bounce underground
+				-- Disable limb collisions so floor doesn't push you
 				Loopkill:Clean(runService.Stepped:Connect(function()
 					if active and lplr.Character then
 						for _, part in ipairs(lplr.Character:GetChildren()) do
@@ -2327,21 +2337,31 @@ run(function()
 				end))
 
 				-- Main Loopkill Cycle
-				Loopkill:Clean(runService.Heartbeat:Connect(function(dt)
+				Loopkill:Clean(runService.Heartbeat:Connect(function()
 					if not active or not entitylib.isAlive then return end
 
 					local curRoot = entitylib.character.RootPart
 					local curHum = entitylib.character.Humanoid
 					if not curRoot or not curHum then return end
 
-					local targetChar = targetPlayer.Character
-					local targetHum = targetChar and targetChar:FindFirstChildOfClass('Humanoid')
-					local targetRoot = targetChar and (targetChar:FindFirstChild('Head') or targetChar:FindFirstChild('HumanoidRootPart'))
-					local isTargetAlive = targetHum and targetHum.Health > 0 and targetRoot
+					local currentTarget = selectedTarget()
+					if not currentTarget or not currentTarget.Character then
+						-- Target missing or despawned: Return to surface
+						if savedCFrame then
+							curRoot.CFrame = savedCFrame
+							curRoot.AssemblyLinearVelocity = Vector3.zero
+						end
+						return
+					end
 
-					--// TARGET IS DEAD: Return immediately to original position
-					if not isTargetAlive then
-						if ReturnOnDeath.Enabled and savedCFrame then
+					local targetChar = currentTarget.Character
+					local targetHum = targetChar:FindFirstChildOfClass('Humanoid')
+					local targetHead = targetChar:FindFirstChild('Head') or targetChar:FindFirstChild('HumanoidRootPart')
+					local targetEntity = entitylib.getEntity(currentTarget)
+
+					--// 1. TARGET IS DEAD: Return immediately to original surface position
+					if not targetHum or targetHum.Health <= 0 or not targetHead then
+						if savedCFrame then
 							curRoot.CFrame = savedCFrame
 							curRoot.AssemblyLinearVelocity = Vector3.zero
 							curRoot.AssemblyAngularVelocity = Vector3.zero
@@ -2349,52 +2369,56 @@ run(function()
 						return
 					end
 
-					local targetPos = targetRoot.Position
-					local entity = entitylib.getEntity(targetPlayer)
-					local depth = UndergroundDepth.Value
-
-					-- Position directly below the target's feet/floor
+					local targetPos = targetHead.Position
+					local depth = DepthSlider.Value
 					local undergroundPos = targetPos - Vector3.new(0, depth, 0)
-					local wallbangPossible = canWallbangFrom(undergroundPos, targetRoot, entity)
 
-					frameCounter += 1
+					--// 2. CHECK IF WALLBANG IS POSSIBLE FROM UNDERGROUND
+					local canWallbang = checkWallbangPossible(undergroundPos, targetPos, targetEntity)
 
-					if wallbangPossible then
-						-- Auto equip weapon
+					if canWallbang then
+						-- Auto equip firearm
 						if AutoEquip.Enabled then
-							local weapon = getWeapon()
+							local weapon = getFirearm()
 							if weapon and curHum and weapon.Parent ~= lplr.Character then
 								curHum:EquipTool(weapon)
 							end
 						end
 
-						-- Cycle Up and Down: flicker between depth and slight peek to avoid detection
-						local cycle = frameCounter % (CycleSpeed.Value * 2)
-						local currentDepth = (cycle < CycleSpeed.Value) and depth or (depth - 3)
-						local peekPos = targetPos - Vector3.new(0, currentDepth, 0)
+						frameCount += 1
 
-						curRoot.CFrame = CFrame.new(peekPos) * CFrame.Angles(0, math.rad(targetRoot.Orientation.Y), 0)
+						--// 3. CYCLE UP AND DOWN (Flicker)
+						local cycleInterval = CycleRate.Value
+						local isUpPhase = (frameCount % (cycleInterval * 2)) < cycleInterval
+						local currentDepth = isUpPhase and depth or (depth - 3.5)
+						local cyclePos = targetPos - Vector3.new(0, currentDepth, 0)
+
+						curRoot.CFrame = CFrame.new(cyclePos) * CFrame.Angles(0, math.rad(targetHead.Orientation.Y), 0)
 						curRoot.AssemblyLinearVelocity = Vector3.zero
 
 						-- Auto fire with gun fire rate
-						if os.clock() > fireDelay then
-							local tool = lplr.Character:FindFirstChildWhichIsA('Tool')
-							local gunData = debug.getupvalue(oldshoot or pl.Shoot, 10)
-							local rate = gunData and gunData.FireRate or 0.1
+						local equippedTool = lplr.Character:FindFirstChildWhichIsA('Tool')
+						if equippedTool and equippedTool:GetAttribute('FireRate') then
+							local rate = equippedTool:GetAttribute('FireRate') or 0.1
+							local ammo = equippedTool:GetAttribute('Local_CurrentAmmo') or 1
 
-							fireDelay = os.clock() + rate
-							if pl.Shoot then
-								local obj = {
-									UserInputState = Enum.UserInputState.Begin,
-									UserInputType = Enum.UserInputType.MouseButton1,
-									Position = Vector3.zero
-								}
-								task.spawn(pl.Shoot, obj)
-								obj.UserInputState = Enum.UserInputState.End
+							if ammo <= 0 and AutoReloadWeapon.Enabled then
+								task.spawn(pl.Reload)
+							elseif os.clock() > lastShootTime then
+								lastShootTime = os.clock() + rate
+								if pl.Shoot then
+									local clickObj = {
+										UserInputState = Enum.UserInputState.Begin,
+										UserInputType = Enum.UserInputType.MouseButton1,
+										Position = Vector3.zero
+									}
+									task.spawn(pl.Shoot, clickObj)
+									clickObj.UserInputState = Enum.UserInputState.End
+								end
 							end
 						end
 					else
-						-- If wallbang is NOT possible from underground, hold safe position
+						--// 4. WALLBANG NOT POSSIBLE: Stay safe at original surface position
 						if savedCFrame then
 							curRoot.CFrame = savedCFrame
 							curRoot.AssemblyLinearVelocity = Vector3.zero
@@ -2411,7 +2435,7 @@ run(function()
 				end
 			end
 		end,
-		Tooltip = 'Teleports underground, checks wallbang, auto-fires, cycles up/down, and resets on target death.'
+		Tooltip = 'Teleports underground, checks wallbang with SilentAim, cycles up/down, and resets on target death.'
 	})
 
 	GuardTarget = Loopkill:CreateDropdown({
@@ -2427,35 +2451,35 @@ run(function()
 		List = playerNames('Criminals')
 	})
 
-	UndergroundDepth = Loopkill:CreateSlider({
-		Name = 'Depth',
-		Min = 5,
+	DepthSlider = Loopkill:CreateSlider({
+		Name = 'Underground Depth',
+		Min = 6,
 		Max = 25,
 		Default = 12,
 		Darker = true,
 		Suffix = 'studs',
-		Tooltip = 'How far underground to teleport below the target'
+		Tooltip = 'How far below the target to drop'
 	})
 
-	CycleSpeed = Loopkill:CreateSlider({
-		Name = 'Flicker Speed',
+	CycleRate = Loopkill:CreateSlider({
+		Name = 'Cycle Speed',
 		Min = 1,
 		Max = 10,
 		Default = 3,
 		Darker = true,
-		Tooltip = 'Speed of the up-and-down flicker'
+		Tooltip = 'Speed of the up-and-down flicker underground'
 	})
 
 	AutoEquip = Loopkill:CreateToggle({
 		Name = 'Auto Equip Gun',
 		Default = true,
-		Tooltip = 'Automatically equips a firearm from your backpack'
+		Tooltip = 'Equips weapon automatically'
 	})
 
-	ReturnOnDeath = Loopkill:CreateToggle({
-		Name = 'Return on Death',
+	AutoReloadWeapon = Loopkill:CreateToggle({
+		Name = 'Auto Reload',
 		Default = true,
-		Tooltip = 'Immediately teleports back to your original spot when the target dies'
+		Tooltip = 'Automatically reloads when empty'
 	})
 
 	playersService.PlayerAdded:Connect(function(player)
