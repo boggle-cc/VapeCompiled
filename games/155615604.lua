@@ -1584,7 +1584,6 @@ run(function()
 end)
 
 run(function()
-	-- random bug made this error
 	local CarFling
 	local GuardTarget
 	local InmateTarget
@@ -1592,6 +1591,8 @@ run(function()
 	local Mode
 	local FlingPower
 	local FlickerSpeed
+	local SelfDeath
+	local TargetHeadOnly
 	
 	local oldTargetY = 178
 	local newTargetY = 300
@@ -1763,38 +1764,56 @@ run(function()
 				return
 			end
 	
-			local targetRoot = targetPlayer.Character:FindFirstChild('HumanoidRootPart')
-			if not targetRoot then return end
+			local char = targetPlayer.Character
+			local humanoid = char:FindFirstChildOfClass('Humanoid')
+			local isDead = (not humanoid) or (humanoid.Health <= 0)
+			
+			--// Lock onto their HEAD when they die (or if TargetHeadOnly is on)
+			local targetPart
+			if isDead or TargetHeadOnly.Enabled then
+				targetPart = char:FindFirstChild('Head') or char:FindFirstChild('Torso')
+			else
+				targetPart = char:FindFirstChild('HumanoidRootPart') or char:FindFirstChild('Torso') or char:FindFirstChild('Head')
+			end
+			
+			if not targetPart then return end
 	
 			frameCount += 1
 			shakeTime += deltaTime
-			local humanoid = targetPlayer.Character:FindFirstChildOfClass('Humanoid')
-			local velocity = targetRoot.AssemblyLinearVelocity
-			local horizontalVelocity = Vector3.new(velocity.X, 0, velocity.Z)
-			local moveDirection = humanoid and humanoid.MoveDirection or Vector3.zero
-			local direction
-	
-			if moveDirection.Magnitude > 0.1 then
-				direction = Vector3.new(moveDirection.X, 0, moveDirection.Z).Unit
-			elseif horizontalVelocity.Magnitude > 1.5 then
-				direction = horizontalVelocity.Unit
-			end
-	
+			
 			local predictedPosition, yaw
-			if direction then
-				local speed = math.max(horizontalVelocity.Magnitude, Mode.Value == 'New' and 20 or 16)
-				local leadTime
-				if Mode.Value == 'New' then
-					leadTime = math.max(0, speed * getPingLead(targetPlayer, speed) * predictionMultiplier - leadPullback)
-					predictedPosition = targetRoot.Position + direction * leadTime
-				else
-					leadTime = math.clamp(speed * 0.18, 0.18, 0.65)
-					predictedPosition = targetRoot.Position + direction * speed * leadTime
-				end
-				yaw = math.deg(math.atan2(-direction.X, -direction.Z))
+			
+			if isDead then
+				-- Target is dead: Direct lock on their head without walking prediction
+				predictedPosition = targetPart.Position
+				yaw = targetPart.Orientation.Y
 			else
-				predictedPosition = targetRoot.Position
-				yaw = targetRoot.Orientation.Y
+				local velocity = targetPart.AssemblyLinearVelocity
+				local horizontalVelocity = Vector3.new(velocity.X, 0, velocity.Z)
+				local moveDirection = humanoid and humanoid.MoveDirection or Vector3.zero
+				local direction
+		
+				if moveDirection.Magnitude > 0.1 then
+					direction = Vector3.new(moveDirection.X, 0, moveDirection.Z).Unit
+				elseif horizontalVelocity.Magnitude > 1.5 then
+					direction = horizontalVelocity.Unit
+				end
+		
+				if direction then
+					local speed = math.max(horizontalVelocity.Magnitude, Mode.Value == 'New' and 20 or 16)
+					local leadTime
+					if Mode.Value == 'New' then
+						leadTime = math.max(0, speed * getPingLead(targetPlayer, speed) * predictionMultiplier - leadPullback)
+						predictedPosition = targetPart.Position + direction * leadTime
+					else
+						leadTime = math.clamp(speed * 0.18, 0.18, 0.65)
+						predictedPosition = targetPart.Position + direction * speed * leadTime
+					end
+					yaw = math.deg(math.atan2(-direction.X, -direction.Z))
+				else
+					predictedPosition = targetPart.Position
+					yaw = targetPart.Orientation.Y
+				end
 			end
 	
 			local shake = Vector3.new(
@@ -1804,14 +1823,20 @@ run(function()
 			)
 			local maxFollowY = Mode.Value == 'New' and newMaxFollowY or oldMaxFollowY
 			local minFollowY = Mode.Value == 'New' and newMinFollowY or oldMinFollowY
+			
+			-- If dead, adjust height so the car's bumper slams directly into the head on the ground
+			local yOffset = isDead and 0.5 or -0.6
 			local position = Vector3.new(
 				predictedPosition.X + shake.X,
-				math.clamp(predictedPosition.Y, minFollowY, maxFollowY) - 0.6 + shake.Y,
+				math.clamp(predictedPosition.Y, minFollowY, maxFollowY) + yOffset + shake.Y,
 				predictedPosition.Z + shake.Z
 			)
-			local playerCFrame = CFrame.new(position) * CFrame.Angles(0, math.rad(yaw), 0) * CFrame.new(offset)
+			
+			local currentOffset = isDead and Vector3.zero or offset
+			local playerCFrame = CFrame.new(position) * CFrame.Angles(0, math.rad(yaw), 0) * CFrame.new(currentOffset)
 			local targetY = Mode.Value == 'New' and newTargetY or oldTargetY
 			local highCFrame = CFrame.new(savedX, targetY, savedZ) * CFrame.Angles(0, math.rad(yaw), 0)
+			
 			local flicker = FlickerSpeed.Value
 			if Mode.Value == 'New' and inPrison(predictedPosition) then
 				flicker = math.max(flicker, 6)
@@ -1845,31 +1870,50 @@ run(function()
 	
 			savedX, savedZ = root.Position.X, root.Position.Z
 			carModel = car
-			waitingForDeath = true
-			CarFling:Clean(humanoid.Died:Connect(function()
-				if waitingForDeath then
-					waitingForDeath = false
-					startFling(targetPlayer)
-				end
-			end))
-			CarFling:Clean(runService.Heartbeat:Connect(function()
-				if not waitingForDeath or not entitylib.isAlive then return end
-				local currentRoot = entitylib.character.RootPart
-				local currentHumanoid = entitylib.character.Humanoid
-				local targetY = Mode.Value == 'New' and newTargetY or oldTargetY
-				local highCFrame = CFrame.new(savedX, targetY, savedZ) * CFrame.Angles(0, math.rad(currentRoot.Orientation.Y), 0)
-				moveCar(highCFrame, false, Vector3.new(savedX, targetY, savedZ))
-				currentHumanoid.Sit = true
-				currentRoot.CFrame = highCFrame * CFrame.new(0, 2, 0)
-				currentRoot.AssemblyLinearVelocity = Vector3.zero
-			end))
+			
+			if SelfDeath.Enabled then
+				-- Wait for you to reset/die before flinging
+				waitingForDeath = true
+				CarFling:Clean(humanoid.Died:Connect(function()
+					if waitingForDeath then
+						waitingForDeath = false
+						startFling(targetPlayer)
+					end
+				end))
+				CarFling:Clean(runService.Heartbeat:Connect(function()
+					if not waitingForDeath or not entitylib.isAlive then return end
+					local currentRoot = entitylib.character.RootPart
+					local currentHumanoid = entitylib.character.Humanoid
+					local targetY = Mode.Value == 'New' and newTargetY or oldTargetY
+					local highCFrame = CFrame.new(savedX, targetY, savedZ) * CFrame.Angles(0, math.rad(currentRoot.Orientation.Y), 0)
+					moveCar(highCFrame, false, Vector3.new(savedX, targetY, savedZ))
+					currentHumanoid.Sit = true
+					currentRoot.CFrame = highCFrame * CFrame.new(0, 2, 0)
+					currentRoot.AssemblyLinearVelocity = Vector3.zero
+				end))
+			else
+				-- Start flinging immediately (NO self death needed)
+				startFling(targetPlayer)
+			end
 		end,
-		Tooltip = 'Flicker and fling a vehicle after you die.'
+		Tooltip = 'Flicker and fling a vehicle into the target, launching their head on death.'
 	})
 	
 	Mode = CarFling:CreateDropdown({
 		Name = 'Mode',
 		List = {'Old', 'New'}
+	})
+	
+	TargetHeadOnly = CarFling:CreateToggle({
+		Name = 'Target Head Only',
+		Default = false,
+		Tooltip = 'Always target their head even while alive'
+	})
+
+	SelfDeath = CarFling:CreateToggle({
+		Name = 'Require Self Death',
+		Default = false,
+		Tooltip = 'Wait for your own death first (Leave OFF to fling while alive)'
 	})
 	
 	GuardTarget = CarFling:CreateDropdown({
