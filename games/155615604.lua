@@ -2210,6 +2210,269 @@ run(function()
 end)
 
 run(function()
+	local Loopkill
+	local GuardTarget
+	local InmateTarget
+	local CriminalTarget
+	local UndergroundDepth
+	local CycleSpeed
+	local AutoEquip
+	local ReturnOnDeath
+	
+	local active = false
+	local savedCFrame
+	local undergroundCFrame
+	local frameCounter = 0
+	local fireDelay = 0
+
+	local function playerNames(teamName)
+		local names = {'None'}
+		for _, player in playersService:GetPlayers() do
+			if player ~= lplr and player.Team and player.Team.Name == teamName then
+				table.insert(names, player.DisplayName .. ' - ' .. player.Name)
+			end
+		end
+		return names
+	end
+
+	local function getTargetPlayer(value)
+		local username = value:match(' %- (.+)$')
+		return username and playersService:FindFirstChild(username)
+	end
+
+	local function selectedTarget()
+		for _, value in {GuardTarget.Value, InmateTarget.Value, CriminalTarget.Value} do
+			local player = getTargetPlayer(value)
+			if player then return player end
+		end
+	end
+
+	local function refreshTargets()
+		GuardTarget:Change(playerNames('Guards'))
+		InmateTarget:Change(playerNames('Inmates'))
+		CriminalTarget:Change(playerNames('Criminals'))
+	end
+
+	-- Get available firearm
+	local function getWeapon()
+		local char = lplr.Character
+		local tool = char and char:FindFirstChildWhichIsA('Tool')
+		if tool and tool:GetAttribute('FireRate') and (tool:GetAttribute('Local_CurrentAmmo') or 1) > 0 and tool.Name ~= 'Taser' then
+			return tool
+		end
+
+		local backpack = lplr:FindFirstChildWhichIsA('Backpack')
+		if backpack then
+			for _, t in ipairs(backpack:GetChildren()) do
+				if t:IsA('Tool') and t:GetAttribute('FireRate') and (t:GetAttribute('Local_CurrentAmmo') or 1) > 0 and t.Name ~= 'Taser' then
+					return t
+				end
+			end
+		end
+		return nil
+	end
+
+	-- Check if wallbang is possible from an underground position
+	local function canWallbangFrom(originPos, targetPart, entity)
+		if not OriginScanner.Ray or not targetPart then return false end
+		
+		-- Direct ray check or scanner hit
+		local ray = workspace:Raycast(targetPart.Position, (originPos - targetPart.Position), OriginScanner.Ray)
+		if not ray then
+			return true
+		end
+
+		-- Check if OriginScanner can find a valid penetration point
+		local scanOrigin = OriginScanner:Scan(originPos, targetPart.Position, nil, targetPart, entity)
+		return scanOrigin ~= nil
+	end
+
+	Loopkill = vape.Categories.Blatant:CreateModule({
+		Name = 'Loopkill',
+		Function = function(callback)
+			if callback then
+				local targetPlayer = selectedTarget()
+				if not targetPlayer then
+					notif('Loopkill', 'Select a target player first.', 4, 'alert')
+					Loopkill:Toggle()
+					return
+				end
+
+				-- Automatically ensure SilentAim & Wallbang are enabled for the loopkill
+				if not SilentAim.Enabled then
+					SilentAim:Toggle()
+				end
+				if not Wallbang.Enabled then
+					Wallbang:Toggle()
+				end
+
+				local root = entitylib.character.RootPart
+				if root then
+					savedCFrame = root.CFrame
+				end
+
+				active = true
+				frameCounter = 0
+				fireDelay = 0
+
+				-- Keep limbs noclip so you do not clip or bounce underground
+				Loopkill:Clean(runService.Stepped:Connect(function()
+					if active and lplr.Character then
+						for _, part in ipairs(lplr.Character:GetChildren()) do
+							if part:IsA('BasePart') then
+								part.CanCollide = false
+							end
+						end
+					end
+				end))
+
+				-- Main Loopkill Cycle
+				Loopkill:Clean(runService.Heartbeat:Connect(function(dt)
+					if not active or not entitylib.isAlive then return end
+
+					local curRoot = entitylib.character.RootPart
+					local curHum = entitylib.character.Humanoid
+					if not curRoot or not curHum then return end
+
+					local targetChar = targetPlayer.Character
+					local targetHum = targetChar and targetChar:FindFirstChildOfClass('Humanoid')
+					local targetRoot = targetChar and (targetChar:FindFirstChild('Head') or targetChar:FindFirstChild('HumanoidRootPart'))
+					local isTargetAlive = targetHum and targetHum.Health > 0 and targetRoot
+
+					--// TARGET IS DEAD: Return immediately to original position
+					if not isTargetAlive then
+						if ReturnOnDeath.Enabled and savedCFrame then
+							curRoot.CFrame = savedCFrame
+							curRoot.AssemblyLinearVelocity = Vector3.zero
+							curRoot.AssemblyAngularVelocity = Vector3.zero
+						end
+						return
+					end
+
+					local targetPos = targetRoot.Position
+					local entity = entitylib.getEntity(targetPlayer)
+					local depth = UndergroundDepth.Value
+
+					-- Position directly below the target's feet/floor
+					local undergroundPos = targetPos - Vector3.new(0, depth, 0)
+					local wallbangPossible = canWallbangFrom(undergroundPos, targetRoot, entity)
+
+					frameCounter += 1
+
+					if wallbangPossible then
+						-- Auto equip weapon
+						if AutoEquip.Enabled then
+							local weapon = getWeapon()
+							if weapon and curHum and weapon.Parent ~= lplr.Character then
+								curHum:EquipTool(weapon)
+							end
+						end
+
+						-- Cycle Up and Down: flicker between depth and slight peek to avoid detection
+						local cycle = frameCounter % (CycleSpeed.Value * 2)
+						local currentDepth = (cycle < CycleSpeed.Value) and depth or (depth - 3)
+						local peekPos = targetPos - Vector3.new(0, currentDepth, 0)
+
+						curRoot.CFrame = CFrame.new(peekPos) * CFrame.Angles(0, math.rad(targetRoot.Orientation.Y), 0)
+						curRoot.AssemblyLinearVelocity = Vector3.zero
+
+						-- Auto fire with gun fire rate
+						if os.clock() > fireDelay then
+							local tool = lplr.Character:FindFirstChildWhichIsA('Tool')
+							local gunData = debug.getupvalue(oldshoot or pl.Shoot, 10)
+							local rate = gunData and gunData.FireRate or 0.1
+
+							fireDelay = os.clock() + rate
+							if pl.Shoot then
+								local obj = {
+									UserInputState = Enum.UserInputState.Begin,
+									UserInputType = Enum.UserInputType.MouseButton1,
+									Position = Vector3.zero
+								}
+								task.spawn(pl.Shoot, obj)
+								obj.UserInputState = Enum.UserInputState.End
+							end
+						end
+					else
+						-- If wallbang is NOT possible from underground, hold safe position
+						if savedCFrame then
+							curRoot.CFrame = savedCFrame
+							curRoot.AssemblyLinearVelocity = Vector3.zero
+						end
+					end
+				end))
+			else
+				active = false
+				local root = entitylib.character.RootPart
+				if root and savedCFrame then
+					root.CFrame = savedCFrame
+					root.AssemblyLinearVelocity = Vector3.zero
+					root.AssemblyAngularVelocity = Vector3.zero
+				end
+			end
+		end,
+		Tooltip = 'Teleports underground, checks wallbang, auto-fires, cycles up/down, and resets on target death.'
+	})
+
+	GuardTarget = Loopkill:CreateDropdown({
+		Name = 'Guard',
+		List = playerNames('Guards')
+	})
+	InmateTarget = Loopkill:CreateDropdown({
+		Name = 'Inmates',
+		List = playerNames('Inmates')
+	})
+	CriminalTarget = Loopkill:CreateDropdown({
+		Name = 'Criminals',
+		List = playerNames('Criminals')
+	})
+
+	UndergroundDepth = Loopkill:CreateSlider({
+		Name = 'Depth',
+		Min = 5,
+		Max = 25,
+		Default = 12,
+		Darker = true,
+		Suffix = 'studs',
+		Tooltip = 'How far underground to teleport below the target'
+	})
+
+	CycleSpeed = Loopkill:CreateSlider({
+		Name = 'Flicker Speed',
+		Min = 1,
+		Max = 10,
+		Default = 3,
+		Darker = true,
+		Tooltip = 'Speed of the up-and-down flicker'
+	})
+
+	AutoEquip = Loopkill:CreateToggle({
+		Name = 'Auto Equip Gun',
+		Default = true,
+		Tooltip = 'Automatically equips a firearm from your backpack'
+	})
+
+	ReturnOnDeath = Loopkill:CreateToggle({
+		Name = 'Return on Death',
+		Default = true,
+		Tooltip = 'Immediately teleports back to your original spot when the target dies'
+	})
+
+	playersService.PlayerAdded:Connect(function(player)
+		player:GetPropertyChangedSignal('Team'):Connect(refreshTargets)
+		refreshTargets()
+	end)
+	playersService.PlayerRemoving:Connect(function()
+		refreshTargets()
+	end)
+	for _, player in playersService:GetPlayers() do
+		if player ~= lplr then
+			player:GetPropertyChangedSignal('Team'):Connect(refreshTargets)
+		end
+	end
+end)
+
+run(function()
 	local FastChange
 	local reqteam = game:GetService("ReplicatedStorage"):FindFirstChild("Remotes"):FindFirstChild("RequestTeamChange")
 	local ChooseTeam
